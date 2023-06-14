@@ -3,7 +3,8 @@ A functionally equivalent parser of the numpy.einsum input parser
 """
 
 import itertools
-from typing import Any, Dict, Iterator, List, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+import functools
 
 import numpy as np
 
@@ -83,7 +84,7 @@ def get_symbol(i: int) -> str:
         return chr(i + 140)
 
 
-def gen_unused_symbols(used: str, n: int) -> Iterator[str]:
+def gen_unused_symbols(used: str, n: Optional[int] = None) -> Iterator[str]:
     """Generate ``n`` symbols that are not already in ``used``.
 
     **Examples:**
@@ -93,7 +94,7 @@ def gen_unused_symbols(used: str, n: int) -> Iterator[str]:
     ```
     """
     i = cnt = 0
-    while cnt < n:
+    while n is None or cnt < n:
         s = get_symbol(i)
         i += 1
         if s in used:
@@ -392,3 +393,85 @@ def parse_einsum_input(operands: Any, shapes: bool = False) -> Tuple[str, str, L
         )
 
     return input_subscripts, output_subscript, operands
+
+
+class IncompatibleShapeError(Exception):
+    def __init__(self, shape_a: Tuple[int, ...], shape_b: Tuple[int, ...]) -> None:
+        message = f'Incompatible shapes: {shape_a} vs {shape_b}'
+        super().__init__(message)
+
+
+def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str, shapes_b: List[Tuple[int, ...]]) -> Tuple[List[Tuple[int, ...]], str, Tuple[int, ...]]:
+    assert '...' not in script_a and '...' not in script_b, 'Remove ellipses from scripts before adding'
+    assert '->' in script_a and '->' in script_b, 'Scripts must define an output'
+
+    script_a_in, script_a_out = script_a.split('->')
+    script_a_in = script_a_in.split(',')
+    script_b_in, script_b_out = script_b.split('->')
+    script_b_in = script_b_in.split(',')
+
+    shape_map_a = dict(zip(''.join(script_a_in), [y for x in shapes_a for y in x]))
+    shape_map_b = dict(zip(''.join(script_b_in), [y for x in shapes_b for y in x]))
+
+    inter_shape = find_output_shape(script_a_in, shapes_a, script_a_out)
+    # The shape must checked by reversing the two shapes and then checking both until one runs out.
+    # After that, that one will be broadcastable
+    if functools.reduce(lambda acc, x: acc * x[0] / x[1], zip(inter_shape[::-1], shapes_b[0][::-1]), 1) != 1:
+        raise IncompatibleShapeError(inter_shape, shapes_b[0])
+    output_shape = find_output_shape(script_b_in, shapes_b, script_b_out)
+
+    i = len(shapes_a)
+    j = len(shapes_b)
+
+    unused_symbols_a = gen_unused_symbols(script_a)
+    unused_symbols_b = gen_unused_symbols(script_b)
+
+    while i >= 0 and j >= 0:
+        symbol_a = script_a_out[i]
+        symbol_b = script_b_in[0][j]
+        if shape_map_a[symbol_a] == shape_map_b[symbol_b]:
+            i -= 1
+            j -= 1
+        elif shape_map_a[symbol_a] % shape_map_b[symbol_b] == 0:
+            symbol = next(unused_symbols_a)
+            script_a = script_a.replace(script_a_out[i], script_a_out[i] + symbol)
+            shape_map_a[script_a_out[i]] = shape_map_a[symbol_a] // shape_map_b[symbol_b]
+            shape_map_a[symbol] = shape_map_b[symbol_b]
+
+            j -= 1
+        elif shape_map_b[symbol_b] % shape_map_a[symbol_a] == 0:
+            symbol = next(unused_symbols_b)
+            script_b = script_b.replace(script_b_in[0][j], script_b_in[0][j] + symbol)
+            shape_map_b[script_b_in[0][j]] = shape_map_b[symbol_b] // shape_map_a[symbol_a]
+            shape_map_b[symbol] = shape_map_a[symbol_a]
+
+            i -= 1
+        else:
+            raise IncompatibleShapeError(inter_shape, shapes_b[0])
+
+    unused_symbols = gen_unused_symbols(script_a + script_b)
+    script_a_out = script_a.split('->')[1]
+    script_b_in = script_b.split('->')[0].split(',')[0]
+    assert len(script_a_out) == len(script_b_in), f'len("{script_a_out}") != len("{script_b_in}")'
+
+    for a, b in zip(script_a_out, script_b_in):
+        assert shape_map_a[a] == shape_map_b[b]
+        if a != b:
+            symbol = next(unused_symbols)
+            script_a = script_a.replace(a, symbol)
+            script_b = script_b.replace(b, symbol)
+            shape_map_a[symbol] = shape_map_a[a]
+    input_shapes = [tuple(shape_map_a[s] for s in inp) for inp in script_a.split('->')[0].split(',')]
+    input_shapes.extend(shapes_b[1:])  # TODO: Check if this includes the first shape or not
+
+    script_a_in, script_a_out = script_a.split('->')
+    script_b_in, script_b_out = script_b.split('->')
+
+    assert script_a_out == script_b_in.split(',')[0], f'Incompatible scripts: "{script_a}" and "{script_b}"'
+    script = script_a_in
+    if ',' in script_b_in:
+        script += ',' + script_b_in.split(',', maxsplit=1)[1]
+    script += '->' + script_b_out
+
+    script = alpha_canonicalize(script)
+    return input_shapes, script, output_shape
