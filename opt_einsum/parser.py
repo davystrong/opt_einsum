@@ -402,8 +402,34 @@ class IncompatibleShapeError(Exception):
         super().__init__(message)
 
 
-def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str, shapes_b: List[Tuple[int, ...]]) -> Tuple[List[Tuple[int, ...]], str, Tuple[int, ...]]:
-    assert '...' not in script_a and '...' not in script_b, 'Remove ellipses from scripts before adding'
+def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str,
+                shapes_b: List[Tuple[int, ...]]) -> Tuple[List[Tuple[int, ...]], str, Tuple[int, ...]]:
+    """Reduce two compatible scripts to a single script.
+
+    Shape compatibility:
+        Shapes are compatible if each dimension is the product of some subsequence of a matching
+        shape (of the previous output). For example, (32, 32) and (4, 256) are compatible, since
+        both can be built from the shape (4, 8, 4, 8): (4*8, 4*8) and (4, 8*4*8). On the other
+        hand, (2, 3) and (3, 2) aren't directly compatible since they don't share divisors.
+
+        Note that transposition of axes also causes the transposition of the compatible shape, so
+        while [(3, 2), 'ij->ij', (2, 3)] isn't valid, [(3, 2), 'ij->ji', (2, 3)] is.
+
+    Args:
+        script_a (str): First einsum input script
+        shapes_a (List[Tuple[int, ...]]): First script input shapes
+        script_b (str): Second einsum input script
+        shapes_b (List[Tuple[int, ...]]): Second script input shapes
+
+    Raises:
+        IncompatibleShapeError: If the two scripts aren't compatible
+
+    Returns:
+        Tuple[List[Tuple[int, ...]], str, Tuple[int, ...]]: The new input shapes, the combine
+            einsum script and the original output shape (when the script is "used" the output
+            should be reshaped to this)
+    """
+    assert '...' not in script_a and '...' not in script_b, 'Ellipses must be defined'
     assert '->' in script_a and '->' in script_b, 'Scripts must define an output'
 
     script_a_in, script_a_out = script_a.split('->')
@@ -417,7 +443,8 @@ def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str, s
     inter_shape = find_output_shape(script_a_in, shapes_a, script_a_out)
     # The shape must checked by reversing the two shapes and then checking both until one runs out.
     # After that, that one will be broadcastable
-    if functools.reduce(lambda acc, x: acc * x[0] / x[1], zip(inter_shape[::-1], shapes_b[0][::-1]), 1) != 1:
+    if functools.reduce(lambda acc, x: acc * x[0] / x[1],
+                        zip(inter_shape[::-1], shapes_b[0][::-1]), 1) != 1:
         raise IncompatibleShapeError(inter_shape, shapes_b[0])
     output_shape = find_output_shape(script_b_in, shapes_b, script_b_out)
 
@@ -483,6 +510,15 @@ def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str, s
 
 
 def simplify_script(script: str, input_shapes: List[Tuple[int, ...]]) -> Tuple[str, List[Tuple[int, ...]]]:
+    """Replaces grouped symbols with a single symbol. See `find_grouped_symbols` for details
+
+    Args:
+        script (str): Einsum input script
+        input_shapes (List[Tuple[int, ...]]): Shapes of each input array
+
+    Returns:
+        Tuple[str, List[Tuple[int, ...]]]: New einsum script and new input shapes
+    """
     grouped_symbols = find_grouped_symbols(script)
     unused_symbols = gen_unused_symbols(script)
     shape_map = dict(zip(script.replace(',', ''), sum(input_shapes, start=())))
@@ -495,6 +531,17 @@ def simplify_script(script: str, input_shapes: List[Tuple[int, ...]]) -> Tuple[s
 
 
 def find_grouped_symbols(script: str) -> Iterable[str]:
+    """Finds any groups of symbols which always occur together
+
+    Example:
+        "abcde,abecd->abe" -> ["ab", "cd"]
+
+    Args:
+        script (str): Einsum input script
+
+    Returns:
+        Iterable[str]: Groups of symbols which always occur together
+    """
     seqs: List[Optional[str]] = []
     for prev_comp, comp, next_comp in zip([None, *script[:-1]], script, [*script[1:], None]):
         if comp in [',', '-', '>']:
@@ -520,5 +567,3 @@ def find_grouped_symbols(script: str) -> Iterable[str]:
             group.append(comp)
     if len(group) > 1:
         yield ''.join(group)
-
-# TODO: Check if this works with broadcasting: np.einsum('a,a->a', np.array([4]), np.array([1,2,3]))
