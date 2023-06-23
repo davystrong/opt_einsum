@@ -3,7 +3,8 @@ A functionally equivalent parser of the numpy.einsum input parser
 """
 
 import itertools
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+import math
+from typing import Any, Dict, Generator, Iterable, Iterator, List, Optional, Tuple, Union
 import functools
 
 import numpy as np
@@ -452,26 +453,72 @@ def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str, s
     unused_symbols = gen_unused_symbols(script_a + script_b)
     script_a_out = script_a.split('->')[1]
     script_b_in = script_b.split('->')[0].split(',')[0]
-    assert len(script_a_out) == len(script_b_in), f'len("{script_a_out}") != len("{script_b_in}")'
+    assert len(script_a_out) == len(
+        script_b_in), f'len("{script_a_out}") != len("{script_b_in}"). This is a bug. Please submit a bug report.'
 
     for a, b in zip(script_a_out, script_b_in):
-        assert shape_map_a[a] == shape_map_b[b]
+        assert shape_map_a[a] == shape_map_b[b], "Shapes don't match. This is a bug. Please submit a bug report."
         if a != b:
             symbol = next(unused_symbols)
             script_a = script_a.replace(a, symbol)
             script_b = script_b.replace(b, symbol)
             shape_map_a[symbol] = shape_map_a[a]
     input_shapes = [tuple(shape_map_a[s] for s in inp) for inp in script_a.split('->')[0].split(',')]
-    input_shapes.extend(shapes_b[1:])  # TODO: Check if this includes the first shape or not
+    input_shapes.extend(shapes_b[1:])
 
     script_a_in, script_a_out = script_a.split('->')
     script_b_in, script_b_out = script_b.split('->')
 
-    assert script_a_out == script_b_in.split(',')[0], f'Incompatible scripts: "{script_a}" and "{script_b}"'
+    assert script_a_out == script_b_in.split(
+        ',')[0], f'Incompatible scripts: "{script_a}" and "{script_b}". This is a bug. Please submit a bug report.'
     script = script_a_in
     if ',' in script_b_in:
         script += ',' + script_b_in.split(',', maxsplit=1)[1]
     script += '->' + script_b_out
 
+    script, input_shapes = simplify_script(script, input_shapes)
+
     script = alpha_canonicalize(script)
     return input_shapes, script, output_shape
+
+
+def simplify_script(script: str, input_shapes: List[Tuple[int, ...]]) -> Tuple[str, List[Tuple[int, ...]]]:
+    grouped_symbols = find_grouped_symbols(script)
+    unused_symbols = gen_unused_symbols(script)
+    shape_map = dict(zip(script.replace(',', ''), sum(input_shapes, start=())))
+
+    for group, new_symbol in zip(grouped_symbols, unused_symbols):
+        shape_map[new_symbol] = math.prod(shape_map[s] for s in group)
+        script = script.replace(group, new_symbol)
+
+    return script, [tuple(shape_map[s] for s in inp) for inp in script.split('->')[0].split(',')]
+
+
+def find_grouped_symbols(script: str) -> Iterable[str]:
+    seqs: List[Optional[str]] = []
+    for prev_comp, comp, next_comp in zip([None, *script[:-1]], script, [*script[1:], None]):
+        if comp in [',', '-', '>']:
+            seqs.append(None)
+        elif comp not in seqs:
+            seqs.append(comp)
+        else:
+            seqs.append(None)
+            i = seqs.index(comp)
+            if i == len(seqs) - 1 or seqs[i + 1] != next_comp:
+                seqs.insert(i + 1, None)
+            if i == 0 or seqs[i - 1] != prev_comp:
+                seqs.insert(i, None)
+    seqs.append(None)
+
+    group: List[str] = []
+    for comp in seqs:
+        if comp is None:
+            if len(group) > 1:
+                yield ''.join(group)
+            group = []
+        else:
+            group.append(comp)
+    if len(group) > 1:
+        yield ''.join(group)
+
+# TODO: Check if this works with broadcasting: np.einsum('a,a->a', np.array([4]), np.array([1,2,3]))
