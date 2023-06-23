@@ -4,7 +4,7 @@ A functionally equivalent parser of the numpy.einsum input parser
 
 import itertools
 import math
-from typing import Any, Dict, Generator, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 import functools
 
 import numpy as np
@@ -406,14 +406,13 @@ def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str,
                 shapes_b: List[Tuple[int, ...]]) -> Tuple[List[Tuple[int, ...]], str, Tuple[int, ...]]:
     """Reduce two compatible scripts to a single script.
 
-    Shape compatibility:
-        Shapes are compatible if each dimension is the product of some subsequence of a matching
-        shape (of the previous output). For example, (32, 32) and (4, 256) are compatible, since
-        both can be built from the shape (4, 8, 4, 8): (4*8, 4*8) and (4, 8*4*8). On the other
-        hand, (2, 3) and (3, 2) aren't directly compatible since they don't share divisors.
+    Shapes are compatible if each dimension is the product of some subsequence of a matching
+    shape (of the previous output). For example, (32, 32) and (4, 256) are compatible, since
+    both can be built from the shape (4, 8, 4, 8): (4*8, 4*8) and (4, 8*4*8). On the other
+    hand, (2, 3) and (3, 2) aren't directly compatible since they don't share divisors.
 
-        Note that transposition of axes also causes the transposition of the compatible shape, so
-        while [(3, 2), 'ij->ij', (2, 3)] isn't valid, [(3, 2), 'ij->ji', (2, 3)] is.
+    Note that transposition of axes also causes the transposition of the compatible shape, so
+    while [(3, 2), 'ij->ij', (2, 3)] isn't valid, [(3, 2), 'ij->ji', (2, 3)] is.
 
     Args:
         script_a (str): First einsum input script
@@ -437,6 +436,7 @@ def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str,
     script_b_in, script_b_out = script_b.split('->')
     script_b_in = script_b_in.split(',')
 
+    # Map each symbol to its corresponding size
     shape_map_a = dict(zip(''.join(script_a_in), [y for x in shapes_a for y in x]))
     shape_map_b = dict(zip(''.join(script_b_in), [y for x in shapes_b for y in x]))
 
@@ -454,6 +454,8 @@ def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str,
     unused_symbols_a = gen_unused_symbols(script_a)
     unused_symbols_b = gen_unused_symbols(script_b)
 
+    # Split the components of `script_a` and `script_b` until the shape of the output of `script_a`
+    # and the first input of `script_b` are equal
     while i >= 0 and j >= 0:
         symbol_a = script_a_out[i]
         symbol_b = script_b_in[0][j]
@@ -483,6 +485,7 @@ def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str,
     assert len(script_a_out) == len(
         script_b_in), f'len("{script_a_out}") != len("{script_b_in}"). This is a bug. Please submit a bug report.'
 
+    # Match the symbols in the output of `script_a` to the symbols in the first input of `script_b`
     for a, b in zip(script_a_out, script_b_in):
         assert shape_map_a[a] == shape_map_b[b], "Shapes don't match. This is a bug. Please submit a bug report."
         if a != b:
@@ -490,6 +493,8 @@ def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str,
             script_a = script_a.replace(a, symbol)
             script_b = script_b.replace(b, symbol)
             shape_map_a[symbol] = shape_map_a[a]
+
+    # Merge both scripts
     input_shapes = [tuple(shape_map_a[s] for s in inp) for inp in script_a.split('->')[0].split(',')]
     input_shapes.extend(shapes_b[1:])
 
@@ -503,8 +508,8 @@ def add_scripts(script_a: str, shapes_a: List[Tuple[int, ...]], script_b: str,
         script += ',' + script_b_in.split(',', maxsplit=1)[1]
     script += '->' + script_b_out
 
+    # Simplify and alpha canonicalize. Otherwise symbols may run out on long sequences
     script, input_shapes = simplify_script(script, input_shapes)
-
     script = alpha_canonicalize(script)
     return input_shapes, script, output_shape
 
@@ -531,10 +536,10 @@ def simplify_script(script: str, input_shapes: List[Tuple[int, ...]]) -> Tuple[s
 
 
 def find_grouped_symbols(script: str) -> Iterable[str]:
-    """Finds any groups of symbols which always occur together
+    """Finds any groups of symbols which always occur together. For example:
 
-    Example:
-        "abcde,abecd->abe" -> ["ab", "cd"]
+        >>> list(find_grouped_symbols('abcde,abecd->abe'))
+        ['ab', 'cd']
 
     Args:
         script (str): Einsum input script
